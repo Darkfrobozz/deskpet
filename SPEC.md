@@ -158,6 +158,12 @@ These behaviors are unreachable from a webview and are core to the product:
   at rest (`dirty` flag). Target <0.3 ms of IPC per frame; measure in M1, and if Tauri IPC is
   the bottleneck, fall back to Rust reading a shared atomic position (documented escape hatch).
 - Rendering: sprite sheet with integer-snapped blits for crisp pixels; device-pixel-ratio aware.
+- **Measured cost is composition, not drawing** (§[`docs/m0-windows-report.md`](docs/m0-windows-report.md)):
+  the M0 blob — one ellipse and a few arcs — already costs 65 % of one core at 60 fps, almost all of
+  it DWM recompositing a transparent 200×200 surface. So the leverage is **frames per second, not
+  draw calls**: render 60 Hz while moving, 24 Hz while idle/asleep, and skip frames where nothing
+  changed. M1 exit criteria: **< 15 % of one core when idle, < 35 % while walking**, measured the
+  same way.
 
 ### Asset / pet definition (`assets/pets/<id>/`)
 ```

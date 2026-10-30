@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>shrimp rig spike</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #10141a;
+        color: #8fa5b8;
+        font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <script>
+      /*
+       * SHRIMP RIG SPIKE — not shipping code.
+       *
+       * A self-contained cut-out rig to answer one question: does the skeleton read?
+       * No springs, no IK loop over time, no sim integration — just forward kinematics,
+       * 2-bone IK for the legs, and flat vector shapes per bone.
+       *
+       * Open with ?mode=sheet (default), ?mode=skeleton, ?mode=fill, ?mode=small.
+       */
+
+      const D2R = Math.PI / 180;
+      const deg = (d) => d * D2R;
+
+      /** Body length: rostrum tip → tail-fan root. Everything derives from this. */
+      const S = 132;
+
+      const C = {
+        body: '#FF6A45',
+        shade: '#C93B22',
+        hi: 'rgba(255, 241, 232, 0.72)',
+        eye: '#1A1114',
+        bone: '#38E0C4',
+        joint: '#FFD166',
+        target: '#7FB2FF',
+      };
+
+      // ---------------------------------------------------------------- geometry helpers
+
+      const rot = (p, a) => ({
+        x: p.x * Math.cos(a) - p.y * Math.sin(a),
+        y: p.x * Math.sin(a) + p.y * Math.cos(a),
+      });
+
+      /** Filled tapered segment. Two caps + a quad, all one colour → reads as one shape. */
+      function limb(ctx, p0, p1, w0, w1, color) {
+        const dx = p1.x - p0.x;
+        const dy = p1.y - p0.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const nx = -dy / len;
+        const ny = dx / len;
+        const r0 = w0 / 2;
+        const r1 = w1 / 2;
+
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(p1.x, p1.y, r1, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(p0.x, p0.y, r0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(p0.x + nx * r0, p0.y + ny * r0);
+        ctx.lineTo(p1.x + nx * r1, p1.y + ny * r1);
+        ctx.lineTo(p1.x - nx * r1, p1.y - ny * r1);
+        ctx.lineTo(p0.x - nx * r0, p0.y - ny * r0);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // ---------------------------------------------------------------- the rig
+
+      function makeRig() {
+        const bones = [];
+        const add = (b) => {
+          bones.push(b);
+          return b;
+        };
+
+        // Carapace is the root: its local x axis runs posterior → head (+x = head side).
+        add({
+          id: 'carapace',
+          parent: null,
+          attach: 'root',
+          len: 0.27 * S,
+          rest: 0,
+          shape: 'carapace',
+        });
+
+        // Abdomen: a 6-link chain hinged at the carapace's posterior edge, pointing left.
+        // 180° = pointing left; each child rotates a further -8° (toward "down" on screen).
+        let parent = 'carapace';
+        for (let i = 0; i < 6; i += 1) {
+          add({
+            id: `abdomen.${i}`,
+            parent,
+            attach: i === 0 ? 'origin' : 'tail',
+            offset: { x: 0, y: 0 },
+            len: 0.094 * S,
+            w0: (0.090 - i * 0.006) * S,
+            w1: (0.084 - i * 0.006) * S,
+            rest: i === 0 ? 168 : -9,
+            shape: 'segment',
+          });
+          parent = `abdomen.${i}`;
+        }
+
+        add({
+          id: 'tailroot',
+          parent: 'abdomen.5',
+          attach: 'tail',
+          len: 0.055 * S,
+          w0: 0.09 * S,
+          w1: 0.07 * S,
+          rest: -6,
+          shape: 'limb',
+        });
+
+        for (let i = 0; i < 5; i += 1) {
+          add({
+            id: `flap.${i}`,
+            parent: 'tailroot',
+            attach: 'tail',
+            len: 0.155 * S,
+            w0: 0.010 * S,
+            w1: 0.036 * S,
+            rest: (i - 2) * 16,
+            shape: 'blade',
+          });
+        }
+
+        // Antennae: 4 links, swept up and back over the head.
+        for (const [tag, spread] of [
+          ['a', -4],
+          ['b', 9],
+        ]) {
+          let p = 'carapace';
+          for (let i = 0; i < 4; i += 1) {
+            add({
+              id: `ant.${tag}.${i}`,
+              parent: p,
+              attach: i === 0 ? 'origin' : 'tail',
+              offset: { x: 0.245 * S, y: -0.055 * S },
+              len: 0.135 * S,
+              w0: (0.016 - i * 0.002) * S,
+              w1: (0.014 - i * 0.002) * S,
+              rest: (i === 0 ? -22 : -14) + spread,
+              shape: 'limb',
+            });
+            p = `ant.${tag}.${i}`;
+          }
+        }
+
+        return bones;
+      }
+
+      /** Hips in carapace-local space: front, middle, back pair. */
+      const LEG_HIPS = [
+        { x: 0.215 * S, y: 0.095 * S },
+        { x: 0.125 * S, y: 0.100 * S },
+        { x: 0.035 * S, y: 0.100 * S },
+      ];
+      const THIGH = 0.100 * S;
+      const SHIN = 0.092 * S;
+
+      // ---------------------------------------------------------------- pose helpers
+
+      /** Per-bone local-angle deltas, in degrees. */
+      const POSES = {
+        rest: {},
+        curious: { 'abdomen.0': 4, 'abdomen.1': 5, 'abdomen.2': 5, 'abdomen.3': 4 },
+        sleep: { 'abdomen.1': -13, 'abdomen.2': -13, 'abdomen.3': -12, 'abdomen.4': -10, 'abdomen.5': -8, 'flap.0': 22, 'flap.1': 10, 'flap.4': -22, 'flap.3': -10 },
+        happy: { 'abdomen.1': 7, 'abdomen.2': 7, 'abdomen.3': 6, 'flap.1': -12, 'flap.3': 12 },
+        drag: { 'abdomen.0': -8, 'abdomen.1': 9, 'abdomen.2': 10, 'abdomen.3': 10, 'abdomen.4': 8, 'flap.0': -14, 'flap.4': 14 },
+      };
+
+      function solve(bones, root, pose) {
+        const out = new Map();
+        for (const b of bones) {
+          let x;
+          let y;
+          let a;
+          if (!b.parent) {
+            x = root.x;
+            y = root.y;
+            a = root.a + deg(b.rest);
+          } else {
+            const p = out.get(b.parent);
+            if (b.attach === 'tail') {
+              x = p.tx;
+              y = p.ty;
+            } else {
+              const o = rot(b.offset || { x: 0, y: 0 }, p.a);
+              x = p.x + o.x;
+              y = p.y + o.y;
+            }
+            a = p.a + deg(b.rest + (pose[b.id] || 0));
+          }
+          out.set(b.id, {
+            ...b,
+            x,
+            y,
+            tx: x + Math.cos(a) * b.len,
+            ty: y + Math.sin(a) * b.len,
+            a,
+          });
+        }
+        return out;
+      }
+
+      /** 2-bone IK: returns the knee position, clamped to reach. */
+      function ik2(hip, target, l1, l2) {
+        let dx = target.x - hip.x;
+        let dy = target.y - hip.y;
+        let d = Math.hypot(dx, dy) || 1;
+        const maxd = l1 + l2 - 0.5;
+        const mind = Math.abs(l1 - l2) + 0.5;
+        if (d > maxd) {
+          dx *= maxd / d;
+          dy *= maxd / d;
+          d = maxd;
+        } else if (d < mind) {
+          dx *= mind / d;
+          dy *= mind / d;
+          d = mind;
+        }
+        const base = Math.atan2(dy, dx);
+        const cosA = (d * d + l1 * l1 - l2 * l2) / (2 * d * l1);
+        const a = Math.acos(Math.max(-1, Math.min(1, cosA)));
+        const knee = { x: hip.x + Math.cos(base + a) * l1, y: hip.y + Math.sin(base + a) * l1 };
+        return { knee, foot: { x: hip.x + dx, y: hip.y + dy } };
+      }
+
+      /**
+       * Foot targets. Metachronal wave: pair i is offset 0.12 in phase, front → back,
+       * so the legs tread in a ripple instead of alternating.
+       */
+      function feetFor(carapace, gaitPhase, groundY, stride, lift) {
+        return LEG_HIPS.map((hip, i) => {
+          const hipWorld = {
+            x: carapace.x + rot(hip, carapace.a).x,
+            y: carapace.y + rot(hip, carapace.a).y,
+          };
+          const phase = (gaitPhase + i * 0.12) % 1;
+          const swing = phase < 0.45;
+          // stance: foot stays behind the hip in world space; swing: lifted and moved forward
+          const t = swing ? phase / 0.45 : (phase - 0.45) / 0.55;
+          const sx = swing ? stride * (0.5 - t) : stride * (-0.5 + t);
+          const sy = swing ? -Math.sin(t * Math.PI) * lift : 0;
+          const target = { x: hipWorld.x - sx, y: groundY + sy };
+          return { hip: hipWorld, target, ...ik2(hipWorld, target, THIGH, SHIN) };
+        });
+      }
+
+      // ---------------------------------------------------------------- drawing
+
+      function drawSkeleton(ctx, rig, legs, opts = {}) {
+        ctx.save();
+        ctx.lineCap = 'round';
+        for (const b of rig.values()) {
+          ctx.strokeStyle = C.bone;
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.moveTo(b.x, b.y);
+          ctx.lineTo(b.tx, b.ty);
+          ctx.stroke();
+          ctx.fillStyle = C.joint;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, 2.4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        for (const leg of legs) {
+          if (opts.targets) {
+            ctx.strokeStyle = C.target;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.arc(leg.target.x, leg.target.y, 3.5, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+          ctx.strokeStyle = C.bone;
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.moveTo(leg.hip.x, leg.hip.y);
+          ctx.lineTo(leg.knee.x, leg.knee.y);
+          ctx.lineTo(leg.foot.x, leg.foot.y);
+          ctx.stroke();
+          ctx.fillStyle = C.joint;
+          for (const p of [leg.hip, leg.knee]) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 2.4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        ctx.restore();
+      }
+
+      function drawCarapace(ctx, b) {
+        const len = b.len;
+        ctx.save();
+        ctx.translate(b.x, b.y);
+        ctx.rotate(b.a);
+        ctx.fillStyle = C.body;
+        ctx.beginPath();
+        // shell: rounded, deeper at the back, tapering to the head
+        ctx.moveTo(0.02 * len, -0.40 * len);
+        ctx.bezierCurveTo(0.40 * len, -0.46 * len, 0.82 * len, -0.34 * len, 1.00 * len, -0.04 * len);
+        // rostrum spike, swept slightly up
+        ctx.lineTo(1.30 * len, -0.20 * len);
+        ctx.lineTo(0.98 * len, 0.01 * len);
+        // underside
+        ctx.bezierCurveTo(0.84 * len, 0.32 * len, 0.44 * len, 0.42 * len, 0.04 * len, 0.38 * len);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+
+      function drawEye(ctx, rig, eyeOffset) {
+        const c = rig.get('carapace');
+        const p = {
+          x: c.x + rot(eyeOffset, c.a).x,
+          y: c.y + rot(eyeOffset, c.a).y,
+        };
+        ctx.fillStyle = C.eye;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2.3, 0, Math.PI * 2);
+        ctx.fill();
+        return p;
+      }
+
+      function drawShrimp(ctx, rig, legs, opts = {}) {
+        const meta = opts.meta || {};
+
+        // Tail fan goes behind the last abdominal segment.
+        for (let i = 0; i < 5; i += 1) {
+          const f = rig.get(`flap.${i}`);
+          limb(ctx, { x: f.x, y: f.y }, { x: f.tx, y: f.ty }, f.w0, f.w1, C.shade);
+        }
+        const tr = rig.get('tailroot');
+        limb(ctx, { x: tr.x, y: tr.y }, { x: tr.tx, y: tr.ty }, tr.w0, tr.w1, C.body);
+
+        // Far legs, dimmer and behind the body.
+        ctx.save();
+        ctx.globalAlpha = 0.65;
+        for (const leg of legs) {
+          const o = { x: 6.5, y: -4.5 };
+          limb(
+            ctx,
+            { x: leg.hip.x + o.x, y: leg.hip.y + o.y },
+            { x: leg.knee.x + o.x, y: leg.knee.y + o.y },
+            0.024 * S,
+            0.018 * S,
+            C.shade,
+          );
+          limb(
+            ctx,
+            { x: leg.knee.x + o.x, y: leg.knee.y + o.y },
+            { x: leg.foot.x + o.x, y: leg.foot.y + o.y },
+            0.018 * S,
+            0.012 * S,
+            C.shade,
+          );
+        }
+        ctx.restore();
+
+        // Swimmerets: short paddles under the belly.
+        for (let i = 1; i <= 3; i += 1) {
+          const seg = rig.get(`abdomen.${i}`);
+          const n = { x: -Math.sin(seg.a), y: Math.cos(seg.a) };
+          const base = { x: seg.x + n.x * 0.05 * S, y: seg.y + n.y * 0.05 * S };
+          const wig = Math.sin((opts.t || 0) * 9 + i) * 0.12;
+          const tip = {
+            x: base.x + n.x * 0.075 * S + Math.cos(seg.a + wig) * 0.02 * S,
+            y: base.y + n.y * 0.075 * S + Math.sin(seg.a + wig) * 0.02 * S,
+          };
+          limb(ctx, base, tip, 0.017 * S, 0.008 * S, C.shade);
+        }
+
+        // Abdomen, tail → head so each segment overlaps the previous one's joint.
+        for (let i = 5; i >= 0; i -= 1) {
+          const b = rig.get(`abdomen.${i}`);
+          limb(ctx, { x: b.x, y: b.y }, { x: b.tx, y: b.ty }, b.w0, b.w1, C.body);
+        }
+        // Pale dorsal streak per segment: the seam that makes it read as segmented.
+        // Thin and offset to the upper edge — full-width bands swamped the whole abdomen.
+        for (let i = 5; i >= 0; i -= 1) {
+          const b = rig.get(`abdomen.${i}`);
+          const nx = -Math.sin(b.a);
+          const ny = Math.cos(b.a);
+          const off = -0.30 * b.w0;
+          const at = (t, o = off) => ({
+            x: b.x + (b.tx - b.x) * t + nx * o,
+            y: b.y + (b.ty - b.y) * t + ny * o,
+          });
+          // crease between plates: a thin *dark* seam, mostly hidden by the next plate
+          limb(ctx, at(-0.02), at(0.05), b.w0 * 0.86, b.w0 * 0.82, C.shade);
+          // single quiet highlight per plate, on the dorsal edge
+          limb(ctx, at(0.30, -0.32 * b.w0), at(0.74, -0.32 * b.w1), 0.020 * S, 0.012 * S, C.hi);
+        }
+
+        // Near legs, in front of the abdomen.
+        for (const leg of legs) {
+          limb(ctx, leg.hip, leg.knee, 0.026 * S, 0.019 * S, C.body);
+          limb(ctx, leg.knee, leg.foot, 0.019 * S, 0.013 * S, C.body);
+        }
+
+        drawCarapace(ctx, rig.get('carapace'));
+
+        // Antennae on top of the shell, as strokes.
+        for (const tag of ['a', 'b']) {
+          for (let i = 0; i < 4; i += 1) {
+            const b = rig.get(`ant.${tag}.${i}`);
+            limb(ctx, { x: b.x, y: b.y }, { x: b.tx, y: b.ty }, b.w0, b.w1, i > 1 ? C.shade : C.shade);
+          }
+        }
+
+        if (meta.eye !== false) drawEye(ctx, rig, { x: 0.225 * S, y: -0.075 * S });
+      }
+
+      // ---------------------------------------------------------------- scenes
+
+      function scene(ctx, x, y, scale, { view = 'fill', pose = 'rest', gait = null, t = 0 }) {
+        const rig = solve(makeRig(), { x: 0, y: 0, a: deg(-16) }, POSES[pose] || {});
+        const carapace = rig.get('carapace');
+        const groundY = carapace.y + 0.30 * S;
+        const legs = feetFor(carapace, gait === null ? 0.0 : gait, groundY, 0.062 * S, 0.028 * S);
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(scale, scale);
+        if (view === 'skeleton') {
+          drawSkeleton(ctx, rig, legs, { targets: true });
+        } else if (view === 'both') {
+          ctx.globalAlpha = 0.35;
+          drawShrimp(ctx, rig, legs, { t });
+          ctx.globalAlpha = 1;
+          drawSkeleton(ctx, rig, legs, { targets: true });
+        } else {
+          drawShrimp(ctx, rig, legs, { t });
+        }
+        // ground line
+        ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(-0.1 * S, groundY);
+        ctx.lineTo(1.5 * S, groundY);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function label(ctx, x, y, text) {
+        ctx.fillStyle = '#5f7285';
+        ctx.font = '10px ui-monospace, monospace';
+        ctx.fillText(text, x, y);
+      }
+
+      // ---------------------------------------------------------------- main
+
+      const params = new URLSearchParams(location.search);
+      const mode = params.get('mode') || 'sheet';
+      const canvas = document.getElementById('c');
+      const ctx = canvas.getContext('2d');
+
+      function setup(w, h) {
+        canvas.width = w;
+        canvas.height = h;
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = '#10141a';
+        ctx.fillRect(0, 0, w, h);
+      }
+
+      if (mode === 'sheet') {
+        const cellW = 330;
+        const cellH = 260;
+        setup(cellW * 3, cellH * 2);
+        const cells = [
+          ['skeleton', 'rest', null, '1 · skeleton (rest)'],
+          ['fill', 'rest', null, '2 · filled (rest)'],
+          ['fill', 'rest', 0.0, '3 · gait phase 0.00'],
+          ['fill', 'rest', 0.5, '4 · gait phase 0.50'],
+          ['fill', 'sleep', null, '5 · sleep (curl)'],
+          ['fill', 'drag', null, '6 · dragged (dangle)'],
+        ];
+        cells.forEach(([view, pose, gait, text], i) => {
+          const cx = (i % 3) * cellW;
+          const cy = Math.floor(i / 3) * cellH;
+          ctx.save();
+          ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+          ctx.strokeRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
+          ctx.restore();
+          scene(ctx, cx + 200, cy + 112, 1.3, { view, pose, gait, t: i });
+          label(ctx, cx + 12, cy + 18, text);
+        });
+      } else if (mode === 'small') {
+        // Render at 64 px, then upscale 6x nearest-neighbour: the silhouette test.
+        setup(64 * 6 + 40, 64 * 6 + 40);
+        const off = document.createElement('canvas');
+        off.width = 64;
+        off.height = 64;
+        const octx = off.getContext('2d');
+
+        // Pass 1: draw at 1:1 on a scratch canvas and measure the alpha bbox,
+        // so the silhouette test fits the box regardless of pose.
+        const probe = document.createElement('canvas');
+        probe.width = 640;
+        probe.height = 640;
+        const pctx = probe.getContext('2d');
+        const ox = 300;
+        const oy = 470;
+        scene(pctx, ox, oy, 1, { view: 'fill', pose: 'rest' });
+        const px = pctx.getImageData(0, 0, 640, 640).data;
+        let minX = 640;
+        let minY = 640;
+        let maxX = 0;
+        let maxY = 0;
+        for (let y = 0; y < 640; y += 1) {
+          for (let x = 0; x < 640; x += 1) {
+            if (px[(y * 640 + x) * 4 + 3] > 8) {
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+        const bw = maxX - minX + 1;
+        const bh = maxY - minY + 1;
+        const k = 56 / Math.max(bw, bh);
+        octx.fillStyle = '#12171d';
+        octx.fillRect(0, 0, 64, 64);
+        octx.save();
+        octx.translate(
+          (64 - bw * k) / 2 - minX * k,
+          (64 - bh * k) / 2 - minY * k,
+        );
+        octx.scale(k, k);
+        scene(octx, ox, oy, 1, { view: 'fill', pose: 'rest' });
+        octx.restore();
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(off, 20, 20, 64 * 6, 64 * 6);
+        label(ctx, 20, 16, 'rendered at 64×64, upscaled 6× (nearest) — silhouette test');
+      } else if (mode === 'compare') {
+        // skeleton → artwork → overlay, same pose: the whole pipeline in one image
+        const w = 300;
+        const h = 300;
+        setup(w * 3, h);
+        const panels = [
+          ['skeleton', '1 · bones only'],
+          ['fill', '2 · shapes only'],
+          ['both', '3 · bones over shapes'],
+        ];
+        panels.forEach(([view, text], i) => {
+          const cx = i * w;
+          ctx.save();
+          ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+          ctx.strokeRect(cx + 0.5, 0.5, w - 1, h - 1);
+          ctx.restore();
+          scene(ctx, cx + 176, 120, 1.25, { view, pose: 'rest' });
+          label(ctx, cx + 12, 18, text);
+        });
+      } else {
+        setup(900, 320);
+        scene(ctx, 300, 130, 1.3, { view: mode === 'skeleton' ? 'skeleton' : 'fill', pose: 'rest' });
+        label(ctx, 12, 18, `mode=${mode}`);
+      }
+    </script>
+  </body>
+</html>
