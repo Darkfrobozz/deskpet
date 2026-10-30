@@ -126,7 +126,12 @@
 
       const REST_PIVOT = [0, 1, 2, 3].map((i) => ({ x: i * L, y: 0 }));
 
-      /** Current world pivots and angles for a given per-joint bend. */
+      /**
+       * Current world pivots and angles for a given per-joint bend.
+       * Angles are RADIANS. The slider is in degrees — converting here is the whole point:
+       * feeding degrees into Math.cos() makes "1 degree" mean one radian (57 degrees), and it
+       * hides itself at bend 0 because cos(0) is the same either way.
+       */
       function chainFor(bendDeg) {
         const pivots = [{ x: 0, y: 0 }];
         const angles = [];
@@ -134,7 +139,7 @@
         for (let i = 0; i < 3; i += 1) {
           angles.push(a);
           pivots.push({ x: pivots[i].x + Math.cos(a) * L, y: pivots[i].y + Math.sin(a) * L });
-          a += bendDeg;
+          a += bendDeg * D2R;
         }
         return { pivots, angles };
       }
