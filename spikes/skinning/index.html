@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>skinning — how flesh follows a skeleton</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #10141a;
+        color: #8fa5b8;
+        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .wrap {
+        padding: 14px;
+        max-width: 1180px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 13px;
+        font-weight: 600;
+        color: #cfdcea;
+        margin: 0 0 4px;
+      }
+      p {
+        margin: 0 0 12px;
+        max-width: 78ch;
+        color: #7f93a6;
+      }
+      .row {
+        display: flex;
+        gap: 14px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 10px;
+      }
+      label {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+      }
+      input[type='range'] {
+        width: 220px;
+        accent-color: #38e0c4;
+      }
+      input[type='checkbox'] {
+        accent-color: #38e0c4;
+      }
+      b {
+        color: #ffd166;
+      }
+      canvas {
+        display: block;
+        background: #0c1015;
+        border: 1px solid #1e2731;
+        border-radius: 6px;
+        width: 100%;
+      }
+      .panels {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+      }
+      .cap {
+        font-size: 10px;
+        color: #61758a;
+        padding: 5px 2px 0;
+      }
+      .cap b {
+        color: #9fb4c7;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Skinning: how flesh follows a skeleton</h1>
+      <p>
+        Three bones, one closed outline. Drag the bend slider. The outline's points are bound to
+        bones by <i>weights</i>: each point is moved by a blend of the two nearest bones' transforms,
+        so points near a joint end up halfway between what each bone wants. That blend is why flesh
+        bends smoothly instead of creasing at the joint.
+      </p>
+      <div class="row">
+        <label>bend <input id="bend" type="range" min="0" max="90" value="0" /><b id="bendv">0°</b></label>
+        <label><input id="weights" type="checkbox" /> show vertex weights</label>
+        <label><input id="bones" type="checkbox" /> show bones</label>
+        <span id="stretch"></span>
+      </div>
+      <div class="panels">
+        <div>
+          <canvas id="c1" width="380" height="300"></canvas>
+          <div class="cap"><b>1 · rigid plates only</b> — each bone draws its own shape. Bend it and the outer edge opens into a wedge.</div>
+        </div>
+        <div>
+          <canvas id="c2" width="380" height="300"></canvas>
+          <div class="cap"><b>2 · skinned flesh only</b> — one continuous outline, stretched by blended bone transforms. No holes, and the outside of the bend genuinely elongates.</div>
+        </div>
+        <div>
+          <canvas id="c3" width="380" height="300"></canvas>
+          <div class="cap"><b>3 · plates over flesh</b> — the actual design: rigid armour on top, skinned membrane underneath. Bending shows flesh through the gaps, never the desktop.</div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const D2R = Math.PI / 180;
+
+      // ---------------------------------------------------------------- the chain
+      // 3 bones, rest pose straight along +x. Radii are the only art parameters.
+      const L = 74; // bone length
+      const PLATE_R = 30; // armour thickness
+      const FLESH_R = 25; // membrane sits just inside the plates
+      const GAP = 7; // plate gap at each joint, so the membrane can show
+
+      const C = {
+        plate: '#FF6A45',
+        plateEdge: '#C93B22',
+        flesh: '#8E2B14',
+        bone: '#38E0C4',
+        joint: '#FFD166',
+        w0: '#4D8DFF',
+        w1: '#FF6AD5',
+        w2: '#7BE38B',
+      };
+
+      const REST_PIVOT = [0, 1, 2, 3].map((i) => ({ x: i * L, y: 0 }));
+
+      /** Current world pivots and angles for a given per-joint bend. */
+      function chainFor(bendDeg) {
+        const pivots = [{ x: 0, y: 0 }];
+        const angles = [];
+        let a = 0;
+        for (let i = 0; i < 3; i += 1) {
+          angles.push(a);
+          pivots.push({ x: pivots[i].x + Math.cos(a) * L, y: pivots[i].y + Math.sin(a) * L });
+          a += bendDeg;
+        }
+        return { pivots, angles };
+      }
+
+      // ---------------------------------------------------------------- the flesh outline
+      /** Closed stadium outline around the rest chain, sampled evenly. */
+      function makeFlesh() {
+        const steps = 26;
+        const total = 3 * L;
+        const top = [];
+        const bottom = [];
+        for (let i = 0; i <= steps; i += 1) {
+          const x = (i / steps) * total;
+          top.push({ x, y: -FLESH_R });
+          bottom.push({ x, y: FLESH_R });
+        }
+        // round caps
+        const capR = [];
+        for (let i = 0; i <= 10; i += 1) {
+          const t = -Math.PI / 2 + (i / 10) * Math.PI;
+          capR.push({ x: total + Math.cos(t) * FLESH_R, y: Math.sin(t) * FLESH_R });
+        }
+        const capL = [];
+        for (let i = 0; i <= 10; i += 1) {
+          const t = Math.PI / 2 + (i / 10) * Math.PI;
+          capL.push({ x: Math.cos(t) * FLESH_R, y: Math.sin(t) * FLESH_R });
+        }
+        return [...top, ...capR.slice(1), ...bottom.reverse(), ...capL.slice(1)];
+      }
+
+      /** Distance from a point to a bone's rest segment. */
+      function distToBone(p, i) {
+        const a = REST_PIVOT[i];
+        const b = REST_PIVOT[i + 1];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)));
+        return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
+      }
+
+      /**
+       * Automatic weights: inverse-square distance to each bone, two strongest kept, normalised.
+       * This is "envelope" skinning — no painting needed, and the bone radii are the envelopes.
+       */
+      function weightsFor(p) {
+        const raw = [0, 1, 2].map((i) => 1 / (Math.pow(distToBone(p, i), 2) + 90));
+        const order = raw.map((w, i) => [w, i]).sort((a, b) => b[0] - a[0]).slice(0, 2);
+        const sum = order[0][0] + order[1][0];
+        return order.map(([w, i]) => ({ bone: i, w: w / sum }));
+      }
+
+      /** Linear blend skinning: move a rest-space point by the weighted bone transforms. */
+      function skin(p, w, chain) {
+        let x = 0;
+        let y = 0;
+        for (const { bone, w: weight } of w) {
+          const piv = chain.pivots[bone];
+          const a = chain.angles[bone];
+          const dx = p.x - REST_PIVOT[bone].x;
+          const dy = p.y - REST_PIVOT[bone].y;
+          x += weight * (piv.x + Math.cos(a) * dx - Math.sin(a) * dy);
+          y += weight * (piv.y + Math.sin(a) * dx + Math.cos(a) * dy);
+        }
+        return { x, y };
+      }
+
+      const FLESH = makeFlesh();
+      const WEIGHTS = FLESH.map(weightsFor);
+
+      // ---------------------------------------------------------------- drawing
+
+      function capsule(ctx, p0, p1, r, fill) {
+        const dx = p1.x - p0.x;
+        const dy = p1.y - p0.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const nx = -dy / len;
+        const ny = dx / len;
+        ctx.fillStyle = fill;
+        ctx.beginPath();
+        ctx.arc(p1.x, p1.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(p0.x, p0.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(p0.x + nx * r, p0.y + ny * r);
+        ctx.lineTo(p1.x + nx * r, p1.y + ny * r);
+        ctx.lineTo(p1.x - nx * r, p1.y - ny * r);
+        ctx.lineTo(p0.x - nx * r, p0.y - ny * r);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      function drawPlates(ctx, chain) {
+        for (let i = 0; i < 3; i += 1) {
+          const a = chain.pivots[i];
+          const b = chain.pivots[i + 1];
+          const ang = chain.angles[i];
+          const ux = Math.cos(ang);
+          const uy = Math.sin(ang);
+          // pull the plate ends in so a gap opens at each joint
+          const p0 = { x: a.x + ux * GAP, y: a.y + uy * GAP };
+          const p1 = { x: b.x - ux * GAP, y: b.y - uy * GAP };
+          capsule(ctx, p0, p1, PLATE_R, C.plate);
+          // a darker seam line at the gap edge, so the armour reads as separate plates
+          capsule(ctx, p0, { x: p0.x + ux * 4, y: p0.y + uy * 4 }, PLATE_R * 0.92, C.plateEdge);
+        }
+      }
+
+      function fleshPoints(chain) {
+        return FLESH.map((p, i) => skin(p, WEIGHTS[i], chain));
+      }
+
+      function drawFlesh(ctx, pts, color) {
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i += 1) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
+
+      function drawBones(ctx, chain) {
+        ctx.save();
+        ctx.strokeStyle = C.bone;
+        ctx.lineWidth = 1.4;
+        ctx.lineCap = 'round';
+        for (let i = 0; i < 3; i += 1) {
+          ctx.beginPath();
+          ctx.moveTo(chain.pivots[i].x, chain.pivots[i].y);
+          ctx.lineTo(chain.pivots[i + 1].x, chain.pivots[i + 1].y);
+          ctx.stroke();
+        }
+        ctx.fillStyle = C.joint;
+        for (const p of chain.pivots) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      function drawWeights(ctx, pts) {
+        const colors = [C.w0, C.w1, C.w2];
+        pts.forEach((p, i) => {
+          for (const { bone, w } of WEIGHTS[i]) {
+            ctx.fillStyle = colors[bone];
+            ctx.globalAlpha = 0.25 + w * 0.75;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 2 + w * 2.4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        });
+        ctx.globalAlpha = 1;
+      }
+
+      /** Polyline length, to quantify how much the outside of the bend stretches. */
+      const polyLen = (pts, from, to) => {
+        let sum = 0;
+        for (let i = from; i < to; i += 1) sum += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+        return sum;
+      };
+
+      // ---------------------------------------------------------------- wire up
+
+      const panels = [
+        { el: document.getElementById('c1'), mode: 'plates' },
+        { el: document.getElementById('c2'), mode: 'flesh' },
+        { el: document.getElementById('c3'), mode: 'both' },
+      ];
+      const bendEl = document.getElementById('bend');
+      const bendVal = document.getElementById('bendv');
+      const showW = document.getElementById('weights');
+      const showB = document.getElementById('bones');
+      const stretchEl = document.getElementById('stretch');
+      const TOP_END = 26; // index of the last dorsal sample in FLESH
+
+      function render() {
+        const bend = Number(bendEl.value);
+        bendVal.textContent = `${bend}°`;
+        const chain = chainFor(bend);
+        const pts = fleshPoints(chain);
+
+        // quantify: dorsal edge length vs its rest length
+        const restLen = polyLen(
+          FLESH.map((p) => p),
+          0,
+          TOP_END,
+        );
+        const bentLen = polyLen(pts, 0, TOP_END);
+        const pct = ((bentLen / restLen - 1) * 100).toFixed(1);
+        stretchEl.innerHTML = bend === 0 ? '' : `outer edge stretched <b>${pct}%</b> vs rest`;
+
+        for (const { el, mode } of panels) {
+          const ctx = el.getContext('2d');
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.clearRect(0, 0, el.width, el.height);
+          ctx.save();
+          ctx.translate(52, el.height * 0.52);
+
+          if (mode === 'plates') drawPlates(ctx, chain);
+          if (mode === 'flesh') drawFlesh(ctx, pts, C.flesh);
+          if (mode === 'both') {
+            drawFlesh(ctx, pts, C.flesh);
+            drawPlates(ctx, chain);
+          }
+          if (showW.checked) drawWeights(ctx, pts);
+          if (showB.checked) drawBones(ctx, chain);
+          ctx.restore();
+        }
+      }
+
+      for (const el of [bendEl, showW, showB]) el.addEventListener('input', render);
+      render();
+    </script>
+  </body>
+</html>
