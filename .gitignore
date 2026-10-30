@@ -1,0 +1,44 @@
+# ---------- node / vite ----------
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# ---------- rust / tauri ----------
+target/
+src-tauri/gen/schemas/
+src-tauri/target/
+*.rlib
+*.rmeta
+
+# ---------- build artifacts ----------
+/build/
+*.exe
+*.msi
+*.nsis
+*.dmg
+*.app/
+pet-dist/
+
+# ---------- editors / os ----------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---------- secrets / local ----------
+.env
+.env.local
+*.local
+*.pem
+
+# ---------- misc ----------
+*.log
+playwright-report/
+test-results/
