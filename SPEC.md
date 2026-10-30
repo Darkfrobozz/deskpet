@@ -19,6 +19,45 @@ best-effort stretch goal.
 - Clicking through the empty (transparent) area of the window.
 - Fast iteration loop from WSL; shippable signed-ish builds for Windows and macOS.
 
+### The pet: a shrimp
+
+The target character is a **shrimp**, not a generic blob. Reference illustration:
+[`assets/pets/shrimp/reference.png`](assets/pets/shrimp/reference.png).
+
+Side view, facing right by default: curved segmented carapace in orange-red with pale highlights,
+long swept-back antennae, one visible eye, fan tail at the bottom rear. `facing` is handled by
+mirroring the sprite.
+
+Behavioural brief — what each state should *read* as:
+
+| State | Read |
+|---|---|
+| `idle` | antennae sway, carapace breathes, occasional blink; tail tucked under |
+| `walk` | scuttles sideways in short bursts, tail curled, antennae trailing |
+| `sleep` | curls into a tight comma, antennae folded, `z` marks |
+| `drag` | dangles from the cursor, tail hanging, antennae whipping |
+| `fall` | tumbles, antennae streaming upward |
+| `land` | flattens on impact, antennae overshoot then settle |
+| `happy` | small hop, tail flick, eye squints |
+
+Art requirements:
+
+- Side view, **transparent background**, consistent scale, pivot at the tail/ground contact point.
+- Sprite sheet, one row per state, frames left→right: `idle` 4–6, `walk` 6–8, `sleep` 2,
+  `drag` 2, `fall` 1, `land` 2, `happy` 3. Drawn at 24–32 px per frame, exported at 4× for HiDPI.
+- **The antennae are the character.** They must be separable from the body (own layer, or their
+  own row) so they can be procedurally lagged and swayed instead of purely frame-animated.
+
+What the current reference is *not*: it is a flattened screenshot — opaque pink field
+(`#f6ced7`) inside a dark frame, no alpha, one pose. Turning it into a pet needs alpha
+extraction (chroma key / manual mask), frame slicing, and pivot metadata. That is M1 work;
+**M0 deliberately ships a procedural placeholder so code never blocks on art**, and the
+placeholder is replaced by the shrimp sheet behind the same `Renderer` interface.
+
+Longer term (M5) this character is a strong candidate for **Live2D** (mesh-warped antennae and
+tail is exactly what it is good at) or **Rive** (state machine authored in-graph). The
+`Renderer` interface exists so that is a swap, not a rewrite.
+
 ### Non-goals for v1
 - Fullscreen/exclusive-mode game overlay.
 - Linux Wayland support (technically blocked, see §5).
@@ -39,7 +78,7 @@ best-effort stretch goal.
 | Build tool | **Vite** | Instant HMR, two entry points (`index.html` for the webview, `playground.html` for the dev harness). |
 | UI framework | **none** (vanilla TS + DOM) | The pet is canvas-only; settings panel is a handful of controls. No framework = no startup cost, no upgrade treadmill. Add Svelte later if settings grow. |
 | Renderer | **Canvas2D** first, `Renderer` interface behind it | One pet + sprite sheets doesn't need WebGL. Interface allows PixiJS (particles/effects) or Live2D/Rive later without touching the sim. |
-| Assets | Sprite sheet + `pet.json` (animations, FSM, physics params) | Data-driven pet definitions; placeholder art first, real art later without code changes. |
+| Assets | Sprite sheet + `pet.json` (animations, FSM, physics params) | Data-driven pet definitions; placeholder art first, real shrimp art later without code changes. |
 | Package manager | **pnpm** via corepack | Fast, disk-efficient, both OSes already have corepack. |
 
 ### Considered and rejected
@@ -216,13 +255,15 @@ black/opaque — the single most important visual property of the app is untesta
 
 **Lane A — UI & sim iteration (99 % of the work, zero native build).**
 ```
-WSL:  pnpm dev            # Vite on 0.0.0.0:5173
-Win:  browser → http://localhost:5173/playground.html
+WSL:  npm run dev         # Vite on 0.0.0.0:5173
+Win:  browser → http://localhost:5173
 ```
-WSL2 forwards localhost, so the Windows browser reaches the WSL dev server. `playground.html`
-renders the pet over a simulated desktop (wallpaper + fake taskbar + a virtual cursor + a
-virtual monitor layout) and drives it with the same `core/` code and the `browser.ts` host.
-Drag, throw, physics, FSM, animation timing, bubble layout — all tuned here with HMR.
+WSL2 forwards localhost, so the Windows browser reaches the WSL dev server. There is one entry
+point (`index.html`); the app detects the host at runtime — no `__TAURI_INTERNALS__` means it
+boots the `browser.ts` host, which fakes a desktop (wallpaper + taskbar + a draggable 200×200
+"window" div with a dashed outline). Same `core/` code, same window-move code path, so window
+position bugs are visible in the browser. Drag, throw, physics, FSM, animation timing, bubble
+layout — all tuned here with HMR.
 
 **Lane B — real Windows window behavior, cross-compiled from WSL.**
 ```
@@ -270,15 +311,15 @@ pet/
 ├─ SPEC.md                  ← this file
 ├─ docs/                    ADRs, click-through notes, release runbook
 ├─ package.json             scripts: dev, build, win:build, win:run, test, lint
-├─ vite.config.ts           two entries: index.html + playground.html
-├─ index.html               webview entry (transparent, no scrollbars, user-select:none)
-├─ playground.html          dev harness (fake desktop)
-├─ assets/pets/placeholder/ procedural placeholder pet + pet.json
+├─ vite.config.ts           single entry (no framework plugin)
+├─ index.html               webview entry; browser mode becomes the playground
+├─ assets/pets/shrimp/      reference.png (goal character), sprite sheet + pet.json later
 ├─ src/
-│  ├─ core/                 fsm.ts physics.ts pet.ts types.ts platform.ts (pure TS)
-│  ├─ render/               canvas2d.ts atlas.ts (Renderer interface)
-│  ├─ ui/                   bubble.ts menu.ts settings.ts
-│  ├─ host/                 browser.ts tauri.ts
+│  ├─ core/                 math.ts profile.ts pet.ts types.ts (pure TS, no DOM)
+│  ├─ render/               canvas2d.ts (procedural placeholder; atlas.ts in M1)
+│  ├─ ui/                   bubble.ts (menu.ts, settings.ts later)
+│  ├─ host/                 types.ts index.ts browser.ts tauri.ts
+│  ├─ style.css
 │  └─ main.ts
 ├─ src-tauri/
 │  ├─ tauri.conf.json       transparent, decorations:false, skipTaskbar, alwaysOnTop
@@ -302,9 +343,10 @@ pet/
 - *Exit criteria:* transparent window visible on Windows, no taskbar entry, no focus steal,
   builds from WSL in <60 s cold / <20 s incremental.
 
-**M1 — Sim & renderer.** Sprite atlas loader, `Renderer` interface, Canvas2D renderer, FSM,
-physics, screen-edge behavior, idle→walk→sleep cycles, playground with fake desktop,
-vitest coverage on `core/`. Animation hot-reload.
+**M1 — Sim & renderer + shrimp art.** Sprite atlas loader, `Renderer` interface, FSM, physics,
+screen-edge behavior, idle→walk→sleep cycles, vitest coverage on `core/`, animation hot-reload.
+Art: key the pink out of `reference.png`, draw the shrimp sprite sheet (or commission it), wire
+`pet.json`, and delete the procedural blob once the shrimp reads better.
 
 **M2 — Interaction & OS integration.** Drag/throw with momentum, click reactions, speech
 bubbles, right-click context menu, user-idle detection → sleep, multi-monitor travel, DPI
@@ -338,10 +380,13 @@ LLM chat with a bubble UI · pet pack format + sharing.
 
 ## 10. Open questions
 
-1. **Pet concept & art direction** — what *is* the pet (cat/blob/robot?), and do we commission
-   art, use an existing licensed pack, or ship a procedural placeholder for a while?
-2. **Pixel art or vector/Live2D?** Pixel sprite sheets are cheapest to ship; Live2D looks alive
-   but adds a WebGL renderer and a license to consider.
+1. ~~**Pet concept**~~ — settled: a shrimp (`assets/pets/shrimp/reference.png`). Open: do we
+   commission the sprite sheet, adapt the reference ourselves, or keep the procedural
+   placeholder until later?
+2. **Pixel art or vector/Live2D?** Sprite sheets are cheapest to ship; Live2D makes the
+   antennae and tail genuinely alive but adds a WebGL renderer and a license to consider.
+   Note the reference is flat vector-ish art, not pixel art — a flat sprite sheet and a
+   Live2D rig both fit it, pixel art would require a redraw (and loses the antennae detail).
 3. **Personality features** — does it need speech at all in v1, or purely animation + reactions?
 4. **Does it need to react to the OS** (active window, battery, time of day, music) in v1? That
    determines whether we need permissions early.

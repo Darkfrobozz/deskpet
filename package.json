@@ -1,0 +1,25 @@
+{
+  "name": "deskpet",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "A small always-on-top desktop companion.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "icons": "node tools/gen-icons.mjs",
+    "tauri": "tauri",
+    "app:dev": "tauri dev",
+    "app:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5"
+  }
+}
