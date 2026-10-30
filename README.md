@@ -34,7 +34,11 @@ M0 — walking skeleton. A clickable, draggable blob that wanders the bottom of 
 The goal character is a **shrimp** ([reference](./assets/pets/shrimp/reference.png)); M0 uses a
 procedural blob placeholder so the code never blocks on art. See SPEC.md §1b.
 
-Windows smoke-test checklist: [docs/run-on-windows.md](./docs/run-on-windows.md).
+Platform notes:
+
+- [docs/run-on-windows.md](./docs/run-on-windows.md) — verified smoke test (M0 passed)
+- [docs/run-on-macos.md](./docs/run-on-macos.md) — predicted compile + the list of known-wrong
+  macOS behaviours (Dock icon, Spaces, focus stealing) before anyone files them as bugs
 
 ## Quick start
 

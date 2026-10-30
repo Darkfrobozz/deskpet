@@ -77,6 +77,12 @@ export class TauriHost implements PetHost {
     });
   }
 
+  log(message: string): void {
+    void invoke('log', { message }).catch(() => {
+      /* logging must never be the thing that breaks */
+    });
+  }
+
   onPointer(handler: PointerHandler): void {
     this.handler = handler;
 

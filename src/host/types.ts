@@ -40,4 +40,7 @@ export interface PetHost {
 
   /** Optional: playground shows a HUD, hosts without one ignore this. */
   status?(line: string): void;
+
+  /** Optional: forward a message to the platform log (the webview console is invisible in release). */
+  log?(message: string): void;
 }

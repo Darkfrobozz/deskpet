@@ -71,23 +71,36 @@ async function boot(petCanvas: HTMLCanvasElement): Promise<void> {
   let last = performance.now();
   let fps = 60;
 
+  // A throw anywhere in here used to kill the loop forever: requestAnimationFrame was the last
+  // statement, so one exception meant a frozen pet with no way to recover and nothing in the log
+  // (the webview has no console in a release build). Reschedule first, then it survives anything.
+  let frameErrors = 0;
+
   const frame = (now: number): void => {
-    const dt = Math.min(0.1, (now - last) / 1000);
-    last = now;
-    if (dt > 0) fps = fps * 0.92 + (1 / dt) * 0.08;
+    try {
+      const dt = Math.min(0.1, (now - last) / 1000);
+      last = now;
+      if (dt > 0) fps = fps * 0.92 + (1 / dt) * 0.08;
 
-    host.refresh();
-    const current = pet.tick(dt, host.cursor());
-    bubble.update(dt);
+      host.refresh();
+      const current = pet.tick(dt, host.cursor());
+      bubble.update(dt);
 
-    renderer.draw(current, bubble, debug);
-    host.setWindowPos(current.win);
+      renderer.draw(current, bubble, debug);
+      host.setWindowPos(current.win);
 
-    host.status?.(
-      `${current.state.padEnd(6)} x${Math.round(current.pos.x)} y${Math.round(current.pos.y)}  ${Math.round(fps)} fps`,
-    );
-
-    requestAnimationFrame(frame);
+      host.status?.(
+        `${current.state.padEnd(6)} x${Math.round(current.pos.x)} y${Math.round(current.pos.y)}  ${Math.round(fps)} fps`,
+      );
+    } catch (error) {
+      frameErrors += 1;
+      if (frameErrors === 1) {
+        console.error('[deskpet] frame failed', error);
+        host.log?.(`frame failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+      }
+    } finally {
+      requestAnimationFrame(frame);
+    }
   };
 
   requestAnimationFrame(frame);
