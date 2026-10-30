@@ -256,11 +256,14 @@ Implications for this rig:
 
 The playground (`npm run dev`) is the art tool:
 
-1. **Rig inspector** (press `G`): draw every bone as a line + pivot dot over the art, plus the IK
-   foot targets and gait phase. Non-negotiable — you cannot debug a rig you cannot see.
+1. **Rig editor** — `spikes/shrimp-rig/index.html?mode=edit` (see §11). Place pivots, rotate bones,
+   set lengths and widths, cycle poses, scrub the gait. Non-negotiable — you cannot debug a rig you
+   cannot see.
 2. **Tuning panel**: live sliders for spring stiffness/damping, gait speed/duty/phase lag, antenna
-   gravity, pose blend rates. Write values back to `pet.json` with a button.
+   gravity, pose blend rates. Write values back to `pet.json` with a button. *(Not built yet: the
+   editor covers geometry; springs arrive with `src/anim/`.)*
 3. **Pose gallery**: force any pose state side by side, at 1× and at 64 px, to check the silhouette.
+   `?mode=sheet` and `?mode=small` cover this today.
 4. **Idle soak**: 5 minutes untouched, then assert the rig is motionless (no spring drift).
 
 Success is not "the animation plays". It is: **you leave it on screen for an hour and it still
@@ -289,10 +292,26 @@ Open it directly (`file://` works) or via `npm run dev` → `/spikes/shrimp-rig/
 
 | URL | Shows |
 |---|---|
+| `?mode=edit` | **the placement editor** (default) — drag bones and pivots |
 | `?mode=compare` | bones only → shapes only → bones over shapes, same pose |
-| `?mode=sheet` | skeleton, rest, two gait phases, sleep curl, drag dangle |
-| `?mode=small` | rendered at 64×64 then upscaled 6× nearest-neighbour — the silhouette test |
+| `?mode=sheet` | bones, rest, gait, curious, sleep, dangle |
+| `?mode=small` | rendered at 64×64 then upscaled nearest — the silhouette test |
 | `?mode=skeleton` | bones with IK foot targets and the ground line |
+
+### Editor controls
+
+| Input | Action |
+|---|---|
+| drag a bone | rotate it around its pivot |
+| drag a pivot dot | move the pivot (origin-attached bones: leg hips, antenna bases) |
+| shift + drag | set bone length (distance from pivot) |
+| `[` `]` | widen / narrow the selected bone (`shift` = tip width only) |
+| arrows | nudge angle 0.5° (`shift` = 5°) |
+| `R` | reset the selected bone |
+| `1`–`5` | pose: rest, curious, sleep, happy, drag |
+| hold `space` | animate the gait |
+| `V` | cycle view: shapes / bones / overlay |
+| `C` | dump the rig JSON (also to the clipboard) |
 
 What it established:
 
@@ -305,3 +324,14 @@ What it established:
 - Two mistakes that cost the most time, both now rules in §2/§3: children must attach to the
   parent's **tail** (not its origin), and pale seam bands must be **thin and offset**, never
   full-width.
+- Drag-rotate must normalise the angle to the **shortest equivalent** (±180°), or dragging near the
+  wrap point snaps the bone by a full turn.
+
+### Not in the editor (yet)
+
+- **Leg segment lengths** (thigh/shin) are constants, not per-leg bones — the IK solver takes them
+  as inputs. Make them editable when the legs need per-pair tuning.
+- **No springs, no gravity, no secondary motion.** The drag/dangle pose is a hand-authored angle
+  offset, not simulated. That is `src/anim/`'s job, and it is where the character will actually
+  come alive.
+- **No undo.** `R` resets one bone, `reset all` reverts everything.

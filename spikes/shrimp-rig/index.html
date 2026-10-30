@@ -2,17 +2,81 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>shrimp rig spike</title>
+    <title>shrimp rig</title>
     <style>
       html,
       body {
         margin: 0;
         background: #10141a;
         color: #8fa5b8;
-        font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+        overflow: hidden;
       }
       canvas {
         display: block;
+      }
+      .bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        display: flex;
+        gap: 6px;
+        padding: 7px 9px;
+        background: rgba(9, 13, 18, 0.92);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        backdrop-filter: blur(8px);
+        z-index: 10;
+      }
+      .bar button {
+        font: inherit;
+        color: #a8bccd;
+        background: #1b222b;
+        border: 1px solid #2b3540;
+        border-radius: 5px;
+        padding: 4px 9px;
+        cursor: pointer;
+      }
+      .bar button:hover {
+        border-color: #3d4c5b;
+        color: #d6e4f0;
+      }
+      .bar button.on {
+        background: #1f3a38;
+        border-color: #2f6a63;
+        color: #8fe6d6;
+      }
+      .hud {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        right: 0;
+        padding: 7px 9px;
+        background: rgba(9, 13, 18, 0.92);
+        border-top: 1px solid rgba(255, 255, 255, 0.07);
+        white-space: pre;
+        z-index: 10;
+        color: #7f97ab;
+      }
+      .hud b {
+        color: #ffd166;
+        font-weight: 600;
+      }
+      .hud i {
+        color: #38e0c4;
+        font-style: normal;
+      }
+      textarea {
+        position: fixed;
+        inset: 40px 12px 60px 12px;
+        background: #0b0f14;
+        color: #b9cbda;
+        border: 1px solid #2b3540;
+        border-radius: 6px;
+        font: 11px/1.5 ui-monospace, monospace;
+        padding: 10px;
+        z-index: 20;
+        display: none;
       }
     </style>
   </head>
@@ -20,13 +84,28 @@
     <canvas id="c"></canvas>
     <script>
       /*
-       * SHRIMP RIG SPIKE — not shipping code.
+       * SHRIMP RIG + PLACEMENT EDITOR
        *
-       * A self-contained cut-out rig to answer one question: does the skeleton read?
-       * No springs, no IK loop over time, no sim integration — just forward kinematics,
-       * 2-bone IK for the legs, and flat vector shapes per bone.
+       * A cut-out rig for the minimal shrimp: forward kinematics, 2-bone IK legs, flat vector
+       * shapes per bone. No springs yet (that is src/anim/'s job) — this page is about geometry.
        *
-       * Open with ?mode=sheet (default), ?mode=skeleton, ?mode=fill, ?mode=small.
+       *   ?mode=edit       the editor (default when you open ?mode=edit)
+       *   ?mode=compare    bones / shapes / overlay
+       *   ?mode=sheet      skeleton, rest, gait phases, sleep, dangle
+       *   ?mode=small      64 px silhouette test
+       *   ?mode=skeleton   bones with IK foot targets
+       *
+       * EDITOR
+       *   drag a bone            rotate it
+       *   drag a pivot dot       move the pivot (origin-attached bones only)
+       *   shift + drag           set bone length
+       *   [ / ]                  widen / narrow  (shift = tip only)
+       *   arrows                 nudge angle by 0.5°
+       *   R                      reset selected bone
+       *   1..5                   pose: rest, curious, sleep, happy, drag
+       *   space (hold)           animate the gait
+       *   V                      cycle view
+       *   C                      copy the rig JSON to the clipboard
        */
 
       const D2R = Math.PI / 180;
@@ -34,6 +113,8 @@
 
       /** Body length: rostrum tip → tail-fan root. Everything derives from this. */
       const S = 132;
+      /** Whole-animal tilt. This, not the bone angles, is what makes the comma pose. */
+      const ROOT_TILT = -16;
 
       const C = {
         body: '#FF6A45',
@@ -43,6 +124,7 @@
         bone: '#38E0C4',
         joint: '#FFD166',
         target: '#7FB2FF',
+        sel: '#FFD166',
       };
 
       // ---------------------------------------------------------------- geometry helpers
@@ -52,7 +134,7 @@
         y: p.x * Math.sin(a) + p.y * Math.cos(a),
       });
 
-      /** Filled tapered segment. Two caps + a quad, all one colour → reads as one shape. */
+      /** Filled tapered segment: two caps + a quad, one colour → reads as one shape. */
       function limb(ctx, p0, p1, w0, w1, color) {
         const dx = p1.x - p0.x;
         const dy = p1.y - p0.y;
@@ -78,7 +160,24 @@
         ctx.fill();
       }
 
+      const distToSegment = (p, a, b) => {
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const l2 = dx * dx + dy * dy || 1;
+        const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2));
+        return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
+      };
+
       // ---------------------------------------------------------------- the rig
+
+      /** Hip rest positions in carapace space — editable, they are real bones below. */
+      const LEG_HIPS = [
+        { x: 0.215 * S, y: 0.095 * S },
+        { x: 0.125 * S, y: 0.1 * S },
+        { x: 0.035 * S, y: 0.1 * S },
+      ];
+      const THIGH = 0.1 * S;
+      const SHIN = 0.092 * S;
 
       function makeRig() {
         const bones = [];
@@ -87,18 +186,25 @@
           return b;
         };
 
-        // Carapace is the root: its local x axis runs posterior → head (+x = head side).
-        add({
-          id: 'carapace',
-          parent: null,
-          attach: 'root',
-          len: 0.27 * S,
-          rest: 0,
-          shape: 'carapace',
-        });
+        // Carapace is the root; its local +x runs posterior → head.
+        add({ id: 'carapace', parent: null, attach: 'root', len: 0.27 * S, rest: ROOT_TILT, shape: 'carapace' });
 
-        // Abdomen: a 6-link chain hinged at the carapace's posterior edge, pointing left.
-        // 180° = pointing left; each child rotates a further -8° (toward "down" on screen).
+        // Leg hips: zero-length bones whose only job is to be a draggable pivot.
+        for (let i = 0; i < 3; i += 1) {
+          add({
+            id: `leg.${i}`,
+            parent: 'carapace',
+            attach: 'origin',
+            offset: { ...LEG_HIPS[i] },
+            len: 0,
+            rest: 0,
+            shape: 'none',
+          });
+        }
+
+        // Abdomen: 6 links. Segment 0 hinges at the carapace's posterior edge; each later
+        // segment hinges at its PARENT'S TAIL (attaching to the origin stacks them all on one
+        // point and the abdomen renders as a single lobe).
         let parent = 'carapace';
         for (let i = 0; i < 6; i += 1) {
           add({
@@ -107,7 +213,7 @@
             attach: i === 0 ? 'origin' : 'tail',
             offset: { x: 0, y: 0 },
             len: 0.094 * S,
-            w0: (0.090 - i * 0.006) * S,
+            w0: (0.09 - i * 0.006) * S,
             w1: (0.084 - i * 0.006) * S,
             rest: i === 0 ? 168 : -9,
             shape: 'segment',
@@ -115,16 +221,7 @@
           parent = `abdomen.${i}`;
         }
 
-        add({
-          id: 'tailroot',
-          parent: 'abdomen.5',
-          attach: 'tail',
-          len: 0.055 * S,
-          w0: 0.09 * S,
-          w1: 0.07 * S,
-          rest: -6,
-          shape: 'limb',
-        });
+        add({ id: 'tailroot', parent: 'abdomen.5', attach: 'tail', len: 0.055 * S, w0: 0.09 * S, w1: 0.07 * S, rest: -6, shape: 'limb' });
 
         for (let i = 0; i < 5; i += 1) {
           add({
@@ -132,14 +229,13 @@
             parent: 'tailroot',
             attach: 'tail',
             len: 0.155 * S,
-            w0: 0.010 * S,
+            w0: 0.01 * S,
             w1: 0.036 * S,
             rest: (i - 2) * 16,
             shape: 'blade',
           });
         }
 
-        // Antennae: 4 links, swept up and back over the head.
         for (const [tag, spread] of [
           ['a', -4],
           ['b', 9],
@@ -164,18 +260,9 @@
         return bones;
       }
 
-      /** Hips in carapace-local space: front, middle, back pair. */
-      const LEG_HIPS = [
-        { x: 0.215 * S, y: 0.095 * S },
-        { x: 0.125 * S, y: 0.100 * S },
-        { x: 0.035 * S, y: 0.100 * S },
-      ];
-      const THIGH = 0.100 * S;
-      const SHIN = 0.092 * S;
+      const BONES = makeRig();
+      const BONES_0 = JSON.parse(JSON.stringify(BONES));
 
-      // ---------------------------------------------------------------- pose helpers
-
-      /** Per-bone local-angle deltas, in degrees. */
       const POSES = {
         rest: {},
         curious: { 'abdomen.0': 4, 'abdomen.1': 5, 'abdomen.2': 5, 'abdomen.3': 4 },
@@ -183,6 +270,7 @@
         happy: { 'abdomen.1': 7, 'abdomen.2': 7, 'abdomen.3': 6, 'flap.1': -12, 'flap.3': 12 },
         drag: { 'abdomen.0': -8, 'abdomen.1': 9, 'abdomen.2': 10, 'abdomen.3': 10, 'abdomen.4': 8, 'flap.0': -14, 'flap.4': 14 },
       };
+      const POSE_NAMES = Object.keys(POSES);
 
       function solve(bones, root, pose) {
         const out = new Map();
@@ -206,19 +294,11 @@
             }
             a = p.a + deg(b.rest + (pose[b.id] || 0));
           }
-          out.set(b.id, {
-            ...b,
-            x,
-            y,
-            tx: x + Math.cos(a) * b.len,
-            ty: y + Math.sin(a) * b.len,
-            a,
-          });
+          out.set(b.id, { ...b, x, y, tx: x + Math.cos(a) * b.len, ty: y + Math.sin(a) * b.len, a });
         }
         return out;
       }
 
-      /** 2-bone IK: returns the knee position, clamped to reach. */
       function ik2(hip, target, l1, l2) {
         let dx = target.x - hip.x;
         let dy = target.y - hip.y;
@@ -237,23 +317,17 @@
         const base = Math.atan2(dy, dx);
         const cosA = (d * d + l1 * l1 - l2 * l2) / (2 * d * l1);
         const a = Math.acos(Math.max(-1, Math.min(1, cosA)));
-        const knee = { x: hip.x + Math.cos(base + a) * l1, y: hip.y + Math.sin(base + a) * l1 };
-        return { knee, foot: { x: hip.x + dx, y: hip.y + dy } };
+        return {
+          knee: { x: hip.x + Math.cos(base + a) * l1, y: hip.y + Math.sin(base + a) * l1 },
+          foot: { x: hip.x + dx, y: hip.y + dy },
+        };
       }
 
-      /**
-       * Foot targets. Metachronal wave: pair i is offset 0.12 in phase, front → back,
-       * so the legs tread in a ripple instead of alternating.
-       */
-      function feetFor(carapace, gaitPhase, groundY, stride, lift) {
-        return LEG_HIPS.map((hip, i) => {
-          const hipWorld = {
-            x: carapace.x + rot(hip, carapace.a).x,
-            y: carapace.y + rot(hip, carapace.a).y,
-          };
+      /** Metachronal wave: pair i trails by 0.12 of the cycle, front → back. */
+      function feetFor(hips, gaitPhase, groundY, stride, lift) {
+        return hips.map((hipWorld, i) => {
           const phase = (gaitPhase + i * 0.12) % 1;
           const swing = phase < 0.45;
-          // stance: foot stays behind the hip in world space; swing: lifted and moved forward
           const t = swing ? phase / 0.45 : (phase - 0.45) / 0.55;
           const sx = swing ? stride * (0.5 - t) : stride * (-0.5 + t);
           const sy = swing ? -Math.sin(t * Math.PI) * lift : 0;
@@ -268,15 +342,16 @@
         ctx.save();
         ctx.lineCap = 'round';
         for (const b of rig.values()) {
-          ctx.strokeStyle = C.bone;
-          ctx.lineWidth = 1.4;
+          const sel = opts.selected === b.id;
+          ctx.strokeStyle = sel ? C.sel : C.bone;
+          ctx.lineWidth = sel ? 2.6 : 1.4;
           ctx.beginPath();
           ctx.moveTo(b.x, b.y);
           ctx.lineTo(b.tx, b.ty);
           ctx.stroke();
-          ctx.fillStyle = C.joint;
+          ctx.fillStyle = b.attach === 'origin' && b.parent ? C.joint : sel ? C.sel : 'rgba(255,209,102,0.55)';
           ctx.beginPath();
-          ctx.arc(b.x, b.y, 2.4, 0, Math.PI * 2);
+          ctx.arc(b.x, b.y, sel ? 3.6 : 2.4, 0, Math.PI * 2);
           ctx.fill();
         }
         for (const leg of legs) {
@@ -296,7 +371,7 @@
           ctx.lineTo(leg.knee.x, leg.knee.y);
           ctx.lineTo(leg.foot.x, leg.foot.y);
           ctx.stroke();
-          ctx.fillStyle = C.joint;
+          ctx.fillStyle = 'rgba(255,209,102,0.55)';
           for (const p of [leg.hip, leg.knee]) {
             ctx.beginPath();
             ctx.arc(p.x, p.y, 2.4, 0, Math.PI * 2);
@@ -313,36 +388,27 @@
         ctx.rotate(b.a);
         ctx.fillStyle = C.body;
         ctx.beginPath();
-        // shell: rounded, deeper at the back, tapering to the head
-        ctx.moveTo(0.02 * len, -0.40 * len);
-        ctx.bezierCurveTo(0.40 * len, -0.46 * len, 0.82 * len, -0.34 * len, 1.00 * len, -0.04 * len);
-        // rostrum spike, swept slightly up
-        ctx.lineTo(1.30 * len, -0.20 * len);
+        ctx.moveTo(0.02 * len, -0.4 * len);
+        ctx.bezierCurveTo(0.4 * len, -0.46 * len, 0.82 * len, -0.34 * len, 1.0 * len, -0.04 * len);
+        ctx.lineTo(1.3 * len, -0.2 * len); // rostrum
         ctx.lineTo(0.98 * len, 0.01 * len);
-        // underside
         ctx.bezierCurveTo(0.84 * len, 0.32 * len, 0.44 * len, 0.42 * len, 0.04 * len, 0.38 * len);
         ctx.closePath();
         ctx.fill();
         ctx.restore();
       }
 
-      function drawEye(ctx, rig, eyeOffset) {
-        const c = rig.get('carapace');
-        const p = {
-          x: c.x + rot(eyeOffset, c.a).x,
-          y: c.y + rot(eyeOffset, c.a).y,
-        };
-        ctx.fillStyle = C.eye;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 2.3, 0, Math.PI * 2);
-        ctx.fill();
-        return p;
+      function seg(ctx, b, t0, o0, t1, o1, w0, w1, color) {
+        const nx = -Math.sin(b.a);
+        const ny = Math.cos(b.a);
+        const at = (t, o) => ({
+          x: b.x + (b.tx - b.x) * t + nx * o,
+          y: b.y + (b.ty - b.y) * t + ny * o,
+        });
+        limb(ctx, at(t0, o0), at(t1, o1), w0, w1, color);
       }
 
       function drawShrimp(ctx, rig, legs, opts = {}) {
-        const meta = opts.meta || {};
-
-        // Tail fan goes behind the last abdominal segment.
         for (let i = 0; i < 5; i += 1) {
           const f = rig.get(`flap.${i}`);
           limb(ctx, { x: f.x, y: f.y }, { x: f.tx, y: f.ty }, f.w0, f.w1, C.shade);
@@ -350,66 +416,35 @@
         const tr = rig.get('tailroot');
         limb(ctx, { x: tr.x, y: tr.y }, { x: tr.tx, y: tr.ty }, tr.w0, tr.w1, C.body);
 
-        // Far legs, dimmer and behind the body.
         ctx.save();
         ctx.globalAlpha = 0.65;
         for (const leg of legs) {
           const o = { x: 6.5, y: -4.5 };
-          limb(
-            ctx,
-            { x: leg.hip.x + o.x, y: leg.hip.y + o.y },
-            { x: leg.knee.x + o.x, y: leg.knee.y + o.y },
-            0.024 * S,
-            0.018 * S,
-            C.shade,
-          );
-          limb(
-            ctx,
-            { x: leg.knee.x + o.x, y: leg.knee.y + o.y },
-            { x: leg.foot.x + o.x, y: leg.foot.y + o.y },
-            0.018 * S,
-            0.012 * S,
-            C.shade,
-          );
+          limb(ctx, { x: leg.hip.x + o.x, y: leg.hip.y + o.y }, { x: leg.knee.x + o.x, y: leg.knee.y + o.y }, 0.024 * S, 0.018 * S, C.shade);
+          limb(ctx, { x: leg.knee.x + o.x, y: leg.knee.y + o.y }, { x: leg.foot.x + o.x, y: leg.foot.y + o.y }, 0.018 * S, 0.012 * S, C.shade);
         }
         ctx.restore();
 
-        // Swimmerets: short paddles under the belly.
         for (let i = 1; i <= 3; i += 1) {
-          const seg = rig.get(`abdomen.${i}`);
-          const n = { x: -Math.sin(seg.a), y: Math.cos(seg.a) };
-          const base = { x: seg.x + n.x * 0.05 * S, y: seg.y + n.y * 0.05 * S };
+          const b = rig.get(`abdomen.${i}`);
+          const nx = -Math.sin(b.a);
+          const ny = Math.cos(b.a);
+          const base = { x: b.x + nx * 0.05 * S, y: b.y + ny * 0.05 * S };
           const wig = Math.sin((opts.t || 0) * 9 + i) * 0.12;
-          const tip = {
-            x: base.x + n.x * 0.075 * S + Math.cos(seg.a + wig) * 0.02 * S,
-            y: base.y + n.y * 0.075 * S + Math.sin(seg.a + wig) * 0.02 * S,
-          };
+          const tip = { x: base.x + nx * 0.075 * S + Math.cos(b.a + wig) * 0.02 * S, y: base.y + ny * 0.075 * S + Math.sin(b.a + wig) * 0.02 * S };
           limb(ctx, base, tip, 0.017 * S, 0.008 * S, C.shade);
         }
 
-        // Abdomen, tail → head so each segment overlaps the previous one's joint.
         for (let i = 5; i >= 0; i -= 1) {
           const b = rig.get(`abdomen.${i}`);
           limb(ctx, { x: b.x, y: b.y }, { x: b.tx, y: b.ty }, b.w0, b.w1, C.body);
         }
-        // Pale dorsal streak per segment: the seam that makes it read as segmented.
-        // Thin and offset to the upper edge — full-width bands swamped the whole abdomen.
         for (let i = 5; i >= 0; i -= 1) {
           const b = rig.get(`abdomen.${i}`);
-          const nx = -Math.sin(b.a);
-          const ny = Math.cos(b.a);
-          const off = -0.30 * b.w0;
-          const at = (t, o = off) => ({
-            x: b.x + (b.tx - b.x) * t + nx * o,
-            y: b.y + (b.ty - b.y) * t + ny * o,
-          });
-          // crease between plates: a thin *dark* seam, mostly hidden by the next plate
-          limb(ctx, at(-0.02), at(0.05), b.w0 * 0.86, b.w0 * 0.82, C.shade);
-          // single quiet highlight per plate, on the dorsal edge
-          limb(ctx, at(0.30, -0.32 * b.w0), at(0.74, -0.32 * b.w1), 0.020 * S, 0.012 * S, C.hi);
+          seg(ctx, b, -0.02, 0, 0.05, 0, b.w0 * 0.86, b.w0 * 0.82, C.shade); // crease
+          seg(ctx, b, 0.3, -0.32 * b.w0, 0.74, -0.32 * b.w1, 0.02 * S, 0.012 * S, C.hi); // highlight
         }
 
-        // Near legs, in front of the abdomen.
         for (const leg of legs) {
           limb(ctx, leg.hip, leg.knee, 0.026 * S, 0.019 * S, C.body);
           limb(ctx, leg.knee, leg.foot, 0.019 * S, 0.013 * S, C.body);
@@ -417,45 +452,64 @@
 
         drawCarapace(ctx, rig.get('carapace'));
 
-        // Antennae on top of the shell, as strokes.
         for (const tag of ['a', 'b']) {
           for (let i = 0; i < 4; i += 1) {
             const b = rig.get(`ant.${tag}.${i}`);
-            limb(ctx, { x: b.x, y: b.y }, { x: b.tx, y: b.ty }, b.w0, b.w1, i > 1 ? C.shade : C.shade);
+            limb(ctx, { x: b.x, y: b.y }, { x: b.tx, y: b.ty }, b.w0, b.w1, C.shade);
           }
         }
 
-        if (meta.eye !== false) drawEye(ctx, rig, { x: 0.225 * S, y: -0.075 * S });
+        const c = rig.get('carapace');
+        const e = rot({ x: 0.225 * S, y: -0.075 * S }, c.a);
+        ctx.fillStyle = C.eye;
+        ctx.beginPath();
+        ctx.arc(c.x + e.x, c.y + e.y, 2.3, 0, Math.PI * 2);
+        ctx.fill();
       }
 
       // ---------------------------------------------------------------- scenes
 
-      function scene(ctx, x, y, scale, { view = 'fill', pose = 'rest', gait = null, t = 0 }) {
-        const rig = solve(makeRig(), { x: 0, y: 0, a: deg(-16) }, POSES[pose] || {});
-        const carapace = rig.get('carapace');
-        const groundY = carapace.y + 0.30 * S;
-        const legs = feetFor(carapace, gait === null ? 0.0 : gait, groundY, 0.062 * S, 0.028 * S);
+      function poseFor(name) {
+        return POSES[name] || {};
+      }
 
+      function buildScene({ pose = 'rest', gait = 0, t = 0 }) {
+        const rig = solve(BONES, { x: 0, y: 0, a: 0 }, poseFor(pose));
+        const carapace = rig.get('carapace');
+        const groundY = carapace.y + 0.3 * S;
+        const hips = [0, 1, 2].map((i) => {
+          const b = rig.get(`leg.${i}`);
+          return { x: b.x, y: b.y };
+        });
+        const legs = feetFor(hips, gait, groundY, 0.062 * S, 0.028 * S);
+        return { rig, legs, groundY, t };
+      }
+
+      function paint(ctx, view, s) {
+        if (view === 'skeleton') {
+          drawSkeleton(ctx, s.rig, s.legs, { targets: true, selected: s.selected });
+        } else if (view === 'both') {
+          ctx.globalAlpha = 0.4;
+          drawShrimp(ctx, s.rig, s.legs, { t: s.t });
+          ctx.globalAlpha = 1;
+          drawSkeleton(ctx, s.rig, s.legs, { targets: true, selected: s.selected });
+        } else {
+          drawShrimp(ctx, s.rig, s.legs, { t: s.t });
+        }
+        ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+        ctx.lineWidth = 1 / (s.k || 1);
+        ctx.beginPath();
+        ctx.moveTo(-0.2 * S, s.groundY);
+        ctx.lineTo(1.4 * S, s.groundY);
+        ctx.stroke();
+      }
+
+      function scene(ctx, x, y, scale, opts) {
+        const s = buildScene(opts);
         ctx.save();
         ctx.translate(x, y);
         ctx.scale(scale, scale);
-        if (view === 'skeleton') {
-          drawSkeleton(ctx, rig, legs, { targets: true });
-        } else if (view === 'both') {
-          ctx.globalAlpha = 0.35;
-          drawShrimp(ctx, rig, legs, { t });
-          ctx.globalAlpha = 1;
-          drawSkeleton(ctx, rig, legs, { targets: true });
-        } else {
-          drawShrimp(ctx, rig, legs, { t });
-        }
-        // ground line
-        ctx.strokeStyle = 'rgba(255,255,255,0.10)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(-0.1 * S, groundY);
-        ctx.lineTo(1.5 * S, groundY);
-        ctx.stroke();
+        paint(ctx, opts.view || 'fill', s);
         ctx.restore();
       }
 
@@ -465,115 +519,365 @@
         ctx.fillText(text, x, y);
       }
 
-      // ---------------------------------------------------------------- main
+      // ---------------------------------------------------------------- boot
 
       const params = new URLSearchParams(location.search);
-      const mode = params.get('mode') || 'sheet';
+      const mode = params.get('mode') || 'edit';
       const canvas = document.getElementById('c');
       const ctx = canvas.getContext('2d');
+      const DPR = window.devicePixelRatio || 1;
 
-      function setup(w, h) {
-        canvas.width = w;
-        canvas.height = h;
-        ctx.clearRect(0, 0, w, h);
+      function clear(w, h) {
+        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
         ctx.fillStyle = '#10141a';
         ctx.fillRect(0, 0, w, h);
       }
 
-      if (mode === 'sheet') {
-        const cellW = 330;
-        const cellH = 260;
-        setup(cellW * 3, cellH * 2);
-        const cells = [
-          ['skeleton', 'rest', null, '1 · skeleton (rest)'],
-          ['fill', 'rest', null, '2 · filled (rest)'],
-          ['fill', 'rest', 0.0, '3 · gait phase 0.00'],
-          ['fill', 'rest', 0.5, '4 · gait phase 0.50'],
-          ['fill', 'sleep', null, '5 · sleep (curl)'],
-          ['fill', 'drag', null, '6 · dragged (dangle)'],
-        ];
-        cells.forEach(([view, pose, gait, text], i) => {
-          const cx = (i % 3) * cellW;
-          const cy = Math.floor(i / 3) * cellH;
-          ctx.save();
-          ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-          ctx.strokeRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
-          ctx.restore();
-          scene(ctx, cx + 200, cy + 112, 1.3, { view, pose, gait, t: i });
-          label(ctx, cx + 12, cy + 18, text);
-        });
-      } else if (mode === 'small') {
-        // Render at 64 px, then upscale 6x nearest-neighbour: the silhouette test.
-        setup(64 * 6 + 40, 64 * 6 + 40);
-        const off = document.createElement('canvas');
-        off.width = 64;
-        off.height = 64;
-        const octx = off.getContext('2d');
+      function staticMode() {
+        canvas.width = innerWidth * DPR;
+        canvas.height = innerHeight * DPR;
+        canvas.style.width = '100vw';
+        canvas.style.height = '100vh';
+        clear(canvas.width / DPR, canvas.height / DPR);
 
-        // Pass 1: draw at 1:1 on a scratch canvas and measure the alpha bbox,
-        // so the silhouette test fits the box regardless of pose.
-        const probe = document.createElement('canvas');
-        probe.width = 640;
-        probe.height = 640;
-        const pctx = probe.getContext('2d');
-        const ox = 300;
-        const oy = 470;
-        scene(pctx, ox, oy, 1, { view: 'fill', pose: 'rest' });
-        const px = pctx.getImageData(0, 0, 640, 640).data;
-        let minX = 640;
-        let minY = 640;
-        let maxX = 0;
-        let maxY = 0;
-        for (let y = 0; y < 640; y += 1) {
-          for (let x = 0; x < 640; x += 1) {
-            if (px[(y * 640 + x) * 4 + 3] > 8) {
-              if (x < minX) minX = x;
-              if (x > maxX) maxX = x;
-              if (y < minY) minY = y;
-              if (y > maxY) maxY = y;
+        if (mode === 'compare') {
+          const w = Math.min(innerWidth / 3, 340);
+          ['skeleton', 'fill', 'both'].forEach((view, i) => {
+            const cx = i * w;
+            ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+            ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+            ctx.strokeRect(cx + 0.5, 0.5, w - 1, w - 1);
+            scene(ctx, cx + w * 0.58, w * 0.4, w / 240, { view, pose: 'rest' });
+            label(ctx, cx + 12, 18, `${i + 1} · ${view}`);
+          });
+          return;
+        }
+
+        if (mode === 'small') {
+          const off = document.createElement('canvas');
+          off.width = 64;
+          off.height = 64;
+          const octx = off.getContext('2d');
+          const probe = document.createElement('canvas');
+          probe.width = 640;
+          probe.height = 640;
+          const pctx = probe.getContext('2d');
+          const ox = 300;
+          const oy = 470;
+          scene(pctx, ox, oy, 1, { view: 'fill', pose: 'rest' });
+          const px = pctx.getImageData(0, 0, 640, 640).data;
+          let minX = 640;
+          let minY = 640;
+          let maxX = 0;
+          let maxY = 0;
+          for (let y = 0; y < 640; y += 1) {
+            for (let x = 0; x < 640; x += 1) {
+              if (px[(y * 640 + x) * 4 + 3] > 8) {
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+              }
             }
           }
+          const bw = maxX - minX + 1;
+          const bh = maxY - minY + 1;
+          const k = 56 / Math.max(bw, bh);
+          octx.fillStyle = '#12171d';
+          octx.fillRect(0, 0, 64, 64);
+          octx.save();
+          octx.translate((64 - bw * k) / 2 - minX * k, (64 - bh * k) / 2 - minY * k);
+          octx.scale(k, k);
+          scene(octx, ox, oy, 1, { view: 'fill', pose: 'rest' });
+          octx.restore();
+          const up = Math.min(innerWidth, innerHeight) - 80;
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(off, 40, 40, up, up);
+          label(ctx, 40, 24, `64×64 render, upscaled ${(up / 64).toFixed(0)}× nearest`);
+          return;
         }
-        const bw = maxX - minX + 1;
-        const bh = maxY - minY + 1;
-        const k = 56 / Math.max(bw, bh);
-        octx.fillStyle = '#12171d';
-        octx.fillRect(0, 0, 64, 64);
-        octx.save();
-        octx.translate(
-          (64 - bw * k) / 2 - minX * k,
-          (64 - bh * k) / 2 - minY * k,
-        );
-        octx.scale(k, k);
-        scene(octx, ox, oy, 1, { view: 'fill', pose: 'rest' });
-        octx.restore();
-        ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(off, 20, 20, 64 * 6, 64 * 6);
-        label(ctx, 20, 16, 'rendered at 64×64, upscaled 6× (nearest) — silhouette test');
-      } else if (mode === 'compare') {
-        // skeleton → artwork → overlay, same pose: the whole pipeline in one image
-        const w = 300;
-        const h = 300;
-        setup(w * 3, h);
-        const panels = [
-          ['skeleton', '1 · bones only'],
-          ['fill', '2 · shapes only'],
-          ['both', '3 · bones over shapes'],
-        ];
-        panels.forEach(([view, text], i) => {
-          const cx = i * w;
-          ctx.save();
-          ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-          ctx.strokeRect(cx + 0.5, 0.5, w - 1, h - 1);
-          ctx.restore();
-          scene(ctx, cx + 176, 120, 1.25, { view, pose: 'rest' });
-          label(ctx, cx + 12, 18, text);
-        });
-      } else {
-        setup(900, 320);
-        scene(ctx, 300, 130, 1.3, { view: mode === 'skeleton' ? 'skeleton' : 'fill', pose: 'rest' });
+
+        if (mode === 'sheet') {
+          const cell = Math.min(innerWidth / 3, innerHeight / 2);
+          const cells = [
+            ['skeleton', 'rest', 0, 'bones'],
+            ['fill', 'rest', 0, 'rest'],
+            ['fill', 'rest', 0.5, 'gait 0.5'],
+            ['fill', 'curious', 0, 'curious'],
+            ['fill', 'sleep', 0, 'sleep'],
+            ['fill', 'drag', 0, 'dangle'],
+          ];
+          cells.forEach(([view, pose, gait, text], i) => {
+            const cx = (i % 3) * cell;
+            const cy = Math.floor(i / 3) * cell;
+            ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+            ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+            ctx.strokeRect(cx + 0.5, cy + 0.5, cell - 1, cell - 1);
+            scene(ctx, cx + cell * 0.6, cy + cell * 0.42, cell / 260, { view, pose, gait });
+            label(ctx, cx + 12, cy + 18, text);
+          });
+          return;
+        }
+
+        // skeleton / fill single view
+        scene(ctx, innerWidth * 0.45, innerHeight * 0.34, 1.5, { view: mode === 'skeleton' ? 'skeleton' : 'fill', pose: 'rest' });
         label(ctx, 12, 18, `mode=${mode}`);
       }
+
+      // ---------------------------------------------------------------- editor
+
+      function editor() {
+        let view = 'both';
+        let pose = 'rest';
+        let selected = 'abdomen.2';
+        let gait = 0;
+        let animating = false;
+        let drag = null;
+        const viewStates = ['fill', 'skeleton', 'both'];
+
+        // --- DOM chrome
+        const bar = document.createElement('div');
+        bar.className = 'bar';
+        const mk = (text, onClick) => {
+          const b = document.createElement('button');
+          b.textContent = text;
+          b.onclick = onClick;
+          bar.append(b);
+          return b;
+        };
+        const viewBtn = mk('view: both', () => {
+          view = viewStates[(viewStates.indexOf(view) + 1) % viewStates.length];
+          viewBtn.textContent = `view: ${view}`;
+        });
+        const poseBtn = mk('pose: rest', () => {
+          pose = POSE_NAMES[(POSE_NAMES.indexOf(pose) + 1) % POSE_NAMES.length];
+          poseBtn.textContent = `pose: ${pose}`;
+        });
+        mk('reset all', () => {
+          BONES.length = 0;
+          BONES.push(...JSON.parse(JSON.stringify(BONES_0)));
+        });
+        mk('copy JSON', () => {
+          const out = serialize();
+          const ta = document.getElementById('out');
+          ta.style.display = 'block';
+          ta.value = out;
+          ta.select();
+          navigator.clipboard?.writeText(out).catch(() => {});
+        });
+        mk('close JSON', () => {
+          const ta = document.getElementById('out');
+          ta.style.display = 'none';
+          ta.blur();
+        });
+        const out = document.createElement('textarea');
+        out.id = 'out';
+        out.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Escape') {
+            out.style.display = 'none';
+            out.blur();
+          }
+        });
+        document.body.append(bar, out);
+
+        const hud = document.createElement('div');
+        hud.className = 'hud';
+        document.body.append(hud);
+
+        function serialize() {
+          const keep = ['id', 'parent', 'attach', 'offset', 'len', 'rest', 'w0', 'w1'];
+          const clean = BONES.map((b) => {
+            const o = {};
+            for (const k of keep) {
+              if (b[k] === undefined) continue;
+              if (k === 'offset') {
+                o.offset = [Math.round(b.offset.x * 10) / 10, Math.round(b.offset.y * 10) / 10];
+              } else if (typeof b[k] === 'number') {
+                o[k] = Math.round(b[k] * 10) / 10;
+              } else {
+                o[k] = b[k];
+              }
+            }
+            return o;
+          });
+          return JSON.stringify({ S, rootTilt: ROOT_TILT, bones: clean }, null, 1);
+        }
+
+        // --- layout: root sits low-centre so the animal has room above it
+        const place = () => {
+          canvas.width = innerWidth * DPR;
+          canvas.height = innerHeight * DPR;
+          canvas.style.width = '100vw';
+          canvas.style.height = '100vh';
+          view0.ox = innerWidth * 0.62;
+          view0.oy = innerHeight * 0.52;
+          view0.k = Math.min(innerWidth, innerHeight) / 420;
+        };
+        const view0 = { ox: 0, oy: 0, k: 1 };
+        place();
+        addEventListener('resize', place);
+
+        const toRig = (ev) => ({
+          x: (ev.clientX - view0.ox) / view0.k,
+          y: (ev.clientY - view0.oy) / view0.k,
+        });
+
+        // --- picking
+        function pick(p) {
+          const s = buildScene({ pose, gait });
+          let best = null;
+          for (const b of s.rig.values()) {
+            // pivot handles first
+            if (b.attach === 'origin' && b.parent) {
+              const d = Math.hypot(p.x - b.x, p.y - b.y);
+              if (d < 7 / view0.k && (!best || d < best.d)) best = { id: b.id, mode: 'pivot', d };
+            }
+            const d = distToSegment(p, { x: b.x, y: b.y }, { x: b.tx, y: b.ty });
+            if (d < Math.max(7, 11 / view0.k) && (!best || d < best.d)) best = { id: b.id, mode: 'rotate', d };
+          }
+          return best;
+        }
+
+        canvas.addEventListener('pointerdown', (ev) => {
+          const p = toRig(ev);
+          const hit = pick(p);
+          if (!hit) return;
+          selected = hit.id;
+          const bone = BONES.find((b) => b.id === hit.id);
+          drag = {
+            id: hit.id,
+            mode: ev.shiftKey ? 'length' : hit.mode,
+            bone,
+            start: p,
+            startOffset: bone.offset ? { ...bone.offset } : null,
+          };
+          canvas.setPointerCapture(ev.pointerId);
+        });
+
+        canvas.addEventListener('pointermove', (ev) => {
+          if (!drag) return;
+          const p = toRig(ev);
+          const s = buildScene({ pose, gait });
+          const b = s.rig.get(drag.id);
+          const bone = drag.bone;
+
+          if (drag.mode === 'rotate') {
+            const parentA = b.parent ? s.rig.get(b.parent).a : 0;
+            const want = (Math.atan2(p.y - b.y, p.x - b.x) - parentA) / D2R;
+            const targetLocal = want - (poseFor(pose)[bone.id] || 0);
+            // shortest way round, so dragging near ±180 does not snap by a full turn
+            let delta = (((targetLocal - bone.rest) % 360) + 540) % 360 - 180;
+            bone.rest = Math.round((bone.rest + delta) * 10) / 10;
+          } else if (drag.mode === 'length') {
+            bone.len = Math.max(4, Math.round(Math.hypot(p.x - b.x, p.y - b.y) * 10) / 10);
+          } else if (drag.mode === 'pivot' && b.parent) {
+            const parent = s.rig.get(b.parent);
+            const rel = rot({ x: p.x - parent.x, y: p.y - parent.y }, -parent.a);
+            bone.offset = { x: Math.round(rel.x * 10) / 10, y: Math.round(rel.y * 10) / 10 };
+          }
+        });
+
+        const endDrag = () => {
+          drag = null;
+        };
+        canvas.addEventListener('pointerup', endDrag);
+        canvas.addEventListener('pointercancel', endDrag);
+
+        addEventListener('keydown', (ev) => {
+          if (['v', 'c', 'r', '[', ']'].includes(ev.key) || ev.key.startsWith('Arrow')) ev.preventDefault();
+          const bone = BONES.find((b) => b.id === selected);
+          if (ev.key === 'v') {
+            view = viewStates[(viewStates.indexOf(view) + 1) % viewStates.length];
+            viewBtn.textContent = `view: ${view}`;
+          } else if (ev.key === 'c') {
+            const ta = document.getElementById('out');
+            ta.style.display = 'block';
+            ta.value = serialize();
+            ta.select();
+            navigator.clipboard?.writeText(ta.value).catch(() => {});
+          } else if (ev.key === ' ') {
+            ev.preventDefault();
+            animating = true;
+          } else if (ev.key >= '1' && ev.key <= '5') {
+            pose = POSE_NAMES[Number(ev.key) - 1];
+            poseBtn.textContent = `pose: ${pose}`;
+          } else if (ev.key === 'r' && bone) {
+            const orig = BONES_0.find((b) => b.id === bone.id);
+            Object.assign(bone, JSON.parse(JSON.stringify(orig)));
+          } else if (bone && (ev.key === '[' || ev.key === ']')) {
+            const f = ev.key === ']' ? 1.06 : 1 / 1.06;
+            if (ev.shiftKey) bone.w1 = Math.max(0.5, bone.w1 * f);
+            else {
+              bone.w0 = Math.max(0.5, bone.w0 * f);
+              bone.w1 = Math.max(0.5, bone.w1 * f);
+            }
+          } else if (bone && ev.key.startsWith('Arrow')) {
+            const step = ev.shiftKey ? 5 : 0.5;
+            if (ev.key === 'ArrowUp') bone.rest -= step;
+            if (ev.key === 'ArrowDown') bone.rest += step;
+            if (ev.key === 'ArrowLeft') bone.rest += step;
+            if (ev.key === 'ArrowRight') bone.rest -= step;
+          }
+        });
+        addEventListener('keyup', (ev) => {
+          if (ev.key === ' ') animating = false;
+        });
+
+        // exposed so the rig can be inspected or driven from the console (and by tests)
+        window.__shrimp = {
+          bones: BONES,
+          view: view0,
+          solve: () => buildScene({ pose, gait }),
+          select: (id) => {
+            selected = id;
+          },
+        };
+
+        // --- loop
+        let last = performance.now();
+        const frame = (now) => {
+          const dt = Math.min(0.05, (now - last) / 1000);
+          last = now;
+          if (animating) gait = (gait + dt * 1.6) % 1;
+
+          ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+          ctx.fillStyle = '#10141a';
+          ctx.fillRect(0, 0, innerWidth, innerHeight);
+
+          // grid, so it is obvious when things move
+          ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+          ctx.lineWidth = 1;
+          for (let gx = -S; gx < 2 * S; gx += 20) {
+            const X = view0.ox + gx * view0.k;
+            ctx.beginPath();
+            ctx.moveTo(X, 0);
+            ctx.lineTo(X, innerHeight);
+            ctx.stroke();
+          }
+
+          ctx.save();
+          ctx.translate(view0.ox, view0.oy);
+          ctx.scale(view0.k, view0.k);
+          const s = buildScene({ pose, gait, t: now / 1000 });
+          s.selected = selected;
+          s.k = view0.k;
+          paint(ctx, view, s);
+          ctx.restore();
+
+          const bone = BONES.find((b) => b.id === selected);
+          hud.innerHTML = bone
+            ? `<b>${bone.id}</b>  rest ${bone.rest.toFixed(1)}°  len ${bone.len.toFixed(1)}  w ${bone.w0.toFixed(1)}→${bone.w1.toFixed(1)}` +
+              `   <i>pose ${pose}</i>  gait ${gait.toFixed(2)}  view ${view}\n` +
+              `drag rotate · drag pivot dot to move pivot · shift+drag length · [ ] width · arrows nudge · R reset · 1-5 pose · space gait · V view · C copy JSON`
+            : 'click a bone';
+
+          requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+      }
+
+      if (mode === 'edit') editor();
+      else staticMode();
     </script>
   </body>
 </html>
